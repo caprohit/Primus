@@ -2,20 +2,21 @@
   "name": "Primus — Reach Your Prime",
   "short_name": "Primus",
   "description": "Your daily fitness, diet and wellness tracker",
-  "start_url": "/",
+  "start_url": "/Primus/",
+  "scope": "/Primus/",
   "display": "standalone",
   "background_color": "#0F0F1E",
   "theme_color": "#6C5CE7",
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "/Primus/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "icon-512.png",
+      "src": "/Primus/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
