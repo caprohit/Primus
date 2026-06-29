@@ -570,9 +570,10 @@ input,select,textarea,button{font-family:var(--f)}
     <strong style="color:#A393F5">API Key</strong> — Settings → API Keys → Legacy anon tab → copy anon public key (starts with eyJ…).</p>
     <input class="config-input" type="text" id="sb-url" placeholder="https://xxxxxxxxxxxx.supabase.co">
     <input class="config-input" type="password" id="sb-key" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…">
-    <div style="display:flex;gap:10px;margin-top:4px">
+    <div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-p" id="btn-connect-sb"><i class="ti ti-plug"></i> Connect</button>
       <button class="btn btn-g" id="btn-test-sb"><i class="ti ti-wifi"></i> Test connection</button>
+      <button class="btn btn-g" id="btn-sync-now"><i class="ti ti-refresh"></i> Sync now</button>
     </div>
     <div class="status-row">
       <div class="status-dot" id="conn-dot" style="background:#6B6B8A"></div>
@@ -599,10 +600,17 @@ CREATE TABLE IF NOT EXISTS primus_journal (
   mood TEXT, note_text TEXT, tags TEXT[],
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS primus_data (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 ALTER TABLE primus_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE primus_journal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE primus_data ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "allow_all_logs" ON primus_logs FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_journal" ON primus_journal FOR ALL USING (true) WITH CHECK (true);</pre>
+CREATE POLICY "allow_all_journal" ON primus_journal FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "allow_all_data" ON primus_data FOR ALL USING (true) WITH CHECK (true);</pre>
     <button class="btn btn-g btn-sm" id="btn-copy-sql" style="margin-top:12px"><i class="ti ti-copy"></i> Copy SQL</button>
   </div>
   <div class="card">
@@ -885,7 +893,8 @@ async function testConnection(){
       updateSyncStatus('connected','Connected ✓');
       if(lbl)lbl.textContent='Connected ✓';
       document.getElementById('conn-dot').style.background='var(--green)';
-      showToast('Supabase connected! ✓');
+      showToast('Supabase connected! Pulling data…');
+      pullFromSupabase();
     }else if(res.status===401){
       updateSyncStatus('error','Invalid key (401)');
       if(lbl)lbl.textContent='Invalid API key (401)';
@@ -923,6 +932,122 @@ async function syncJournalToSupabase(entry){
       body:JSON.stringify({entry_date:entry.date,mood:entry.mood,note_text:entry.text,tags:entry.tags})
     });
   }catch(e){}
+}
+
+// Push a key-value blob to primus_data (meal plan, splits, goals)
+async function syncData(key,value){
+  if(!_sbUrl||!_sbKey)return;
+  try{
+    await fetch(`${_sbUrl}/rest/v1/primus_data`,{
+      method:'POST',
+      headers:sbHeaders(_sbKey,{'Prefer':'resolution=merge-duplicates'}),
+      body:JSON.stringify({key,value,updated_at:new Date().toISOString()})
+    });
+  }catch(e){}
+}
+
+// Pull everything from Supabase and merge into local state
+async function pullFromSupabase(){
+  if(!_sbUrl||!_sbKey)return;
+  updateSyncStatus('connected','Syncing…');
+  const lbl=document.getElementById('sb-sync-label');
+  if(lbl)lbl.textContent='Syncing…';
+  try{
+    // 1. Pull daily logs
+    const logsRes=await fetch(`${_sbUrl}/rest/v1/primus_logs?select=*&order=log_date.desc&limit=365`,{headers:sbHeaders(_sbKey)});
+    if(logsRes.ok){
+      const rows=await logsRes.json();
+      rows.forEach(row=>{
+        if(!S.dailyLogs[row.log_date]){
+          S.dailyLogs[row.log_date]={
+            dietPct:row.diet_pct||0,workoutPct:row.workout_pct||0,
+            waterPct:row.water_glasses?p100(row.water_glasses,S.goals.water):0,
+            water:row.water_glasses||0,calories:row.calories_eaten||0,
+            protein:row.protein_g||0,carbs:row.carbs_g||0,fat:row.fat_g||0,
+            mealsDone:row.meals_done||0,mealsTotal:row.meals_total||0,
+            exercisesDone:row.exercises_done||0,exercisesTotal:row.exercises_total||0,
+            savedAt:row.updated_at||row.created_at
+          };
+        }
+      });
+    }
+
+    // 2. Pull journal entries (dedup by date — one entry per day)
+    const journalRes=await fetch(`${_sbUrl}/rest/v1/primus_journal?select=*&order=entry_date.desc`,{headers:sbHeaders(_sbKey)});
+    if(journalRes.ok){
+      const rows=await journalRes.json();
+      rows.forEach(row=>{
+        if(!S.journal.find(e=>e.date===row.entry_date)){
+          S.journal.push({
+            id:new Date(row.created_at).getTime()||Date.now(),
+            date:row.entry_date,mood:row.mood||'',
+            text:row.note_text||'',tags:row.tags||[],
+            createdAt:row.created_at
+          });
+        }
+      });
+    }
+
+    // 3. Pull primus_data blobs (meal plan, splits, custom goals, diet goals)
+    const dataRes=await fetch(`${_sbUrl}/rest/v1/primus_data?select=*`,{headers:sbHeaders(_sbKey)});
+    if(dataRes.ok){
+      const rows=await dataRes.json();
+      rows.forEach(row=>{
+        if(row.key==='meal_plan'&&row.value){
+          // Merge: keep today's done states, replace template from cloud
+          const cloudWp=row.value;
+          DAYS.forEach(day=>{
+            if(!cloudWp[day])return;
+            const localDay=S.wp[day]||{};
+            SLOTS.forEach(slot=>{
+              if(!cloudWp[day][slot])return;
+              const localFoods=localDay[slot]||[];
+              // Restore done states for today by matching food id
+              cloudWp[day][slot]=cloudWp[day][slot].map(cf=>{
+                const lf=localFoods.find(f=>f.id===cf.id);
+                return{...cf,done:lf?lf.done:false};
+              });
+            });
+          });
+          S.wp=cloudWp;
+        }else if(row.key==='workout_splits'&&row.value){
+          const cloudSplits=row.value;
+          DAYS.forEach(day=>{
+            if(!cloudSplits[day])return;
+            const localExs=S.splits[day]||[];
+            cloudSplits[day]=cloudSplits[day].map((ce,i)=>{
+              return{...ce,done:localExs[i]?localExs[i].done:false};
+            });
+          });
+          S.splits=cloudSplits;
+        }else if(row.key==='custom_goals'&&row.value){
+          row.value.forEach(cg=>{
+            const local=S.customGoals.find(g=>g.id===cg.id);
+            if(local){
+              // Keep local logs, update definition from cloud
+              Object.assign(local,{name:cg.name,unit:cg.unit,target:cg.target,cat:cg.cat,icon:cg.icon,dir:cg.dir});
+              // Merge logs: cloud fills in dates not on this device
+              Object.assign(cg.logs||{},local.logs);
+              local.logs=Object.assign({},cg.logs||{},local.logs);
+            }else{
+              S.customGoals.push(cg);
+            }
+          });
+        }else if(row.key==='diet_goals'&&row.value){
+          Object.assign(S.goals,row.value);
+        }
+      });
+    }
+
+    saveState();
+    const now=new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+    updateSyncStatus('connected','Synced · '+now);
+    showToast('Synced from cloud ✓');
+    updateAll();
+  }catch(e){
+    updateSyncStatus('error','Sync error');
+    showToast('Sync error: '+e.message);
+  }
 }
 
 // ── JOURNAL ──
@@ -1213,7 +1338,7 @@ function renderGoalsForm(){
 }
 function saveGoals(){
   ['cal','pro','carb','fat','water'].forEach(k=>{const v=parseInt(document.getElementById('g-'+k).value);if(v>0)S.goals[k]=v;});
-  saveState();updateAll();
+  saveState();syncData('diet_goals',S.goals);updateAll();
   const ok=document.getElementById('goals-ok');ok.style.display='block';setTimeout(()=>ok.style.display='none',3000);
   showToast('Goals saved — all pages updated');
 }
@@ -1446,7 +1571,7 @@ function confirmFood(){
   if(!S.wp[day][slot])S.wp[day][slot]=[];
   if(S.fCtx.ei!==null&&S.fCtx.ei!==undefined){Object.assign(S.wp[day][slot][S.fCtx.ei],{name,cal,pro,carb,fat,note});showToast('Updated');}
   else{S.wp[day][slot].push({id:S.nid++,name,cal,pro,carb,fat,note,done:false});showToast('Added to '+slot);}
-  saveState();closeModal();updateAll();
+  saveState();syncData('meal_plan',S.wp);closeModal();updateAll();
 }
 
 // ── SNACK MODAL ──
@@ -1461,7 +1586,7 @@ function confirmSnack(){
   if(!S.wp[TN].Snack)S.wp[TN].Snack=[];
   S.wp[TN].Snack.push({id:S.nid++,name,cal,pro,carb,fat,note:'',done:false});
   ['sn-n','sn-c','sn-p','sn-cb','sn-f'].forEach(id=>document.getElementById(id).value='');
-  saveState();closeModal();showToast('Snack added');updateAll();
+  saveState();syncData('meal_plan',S.wp);closeModal();showToast('Snack added');updateAll();
 }
 
 // ── SPLIT MODAL ──
@@ -1485,7 +1610,7 @@ function confirmSplit(){
   if(!S.splits[day])S.splits[day]=[];
   if(S.sCtx.ei!==null&&S.sCtx.ei!==undefined&&S.sCtx.day){Object.assign(S.splits[S.sCtx.day][S.sCtx.ei],{name,meta,group});showToast('Exercise updated');}
   else{S.splits[day].push({name,meta,group,done:false});showToast('Exercise added to '+day);}
-  S.splitDay=day;saveState();closeModal();updateAll();
+  S.splitDay=day;saveState();syncData('workout_splits',S.splits);closeModal();updateAll();
 }
 
 // ── GOAL MODAL ──
@@ -1508,7 +1633,7 @@ function confirmGoal(){
   if(!name||!unit||isNaN(target)||target<=0){showToast('Fill in name, unit and a valid target');return;}
   if(_goalEditId){const g=S.customGoals.find(g=>g.id===_goalEditId);if(g)Object.assign(g,{name,unit,target,cat,icon,dir});showToast('Goal updated');}
   else{S.customGoals.push({id:'cg'+Date.now(),name,unit,target,cat,icon,dir,logs:{}});showToast('Goal added');}
-  saveState();closeModal();updateAll();
+  saveState();syncData('custom_goals',S.customGoals);closeModal();updateAll();
 }
 
 // ── DELETE ──
@@ -1520,10 +1645,10 @@ function askDelete(type,day,slot,idx,label){
 function executeDel(){
   if(!_delCtx)return;
   const{type,day,slot,idx,id}=_delCtx;
-  if(type==='food'){S.wp[day][slot].splice(idx,1);showToast('Food item deleted');}
-  else if(type==='split'){S.splits[day].splice(idx,1);showToast('Exercise deleted');}
-  else if(type==='journal'){S.journal=S.journal.filter(e=>e.id!==id);showToast('Journal entry deleted');renderJournalList();renderTodayJournalPreview();}
-  else if(type==='customGoal'){S.customGoals=S.customGoals.filter(g=>g.id!==id);showToast('Goal deleted');}
+  if(type==='food'){S.wp[day][slot].splice(idx,1);saveState();syncData('meal_plan',S.wp);showToast('Food item deleted');}
+  else if(type==='split'){S.splits[day].splice(idx,1);saveState();syncData('workout_splits',S.splits);showToast('Exercise deleted');}
+  else if(type==='journal'){S.journal=S.journal.filter(e=>e.id!==id);saveState();showToast('Journal entry deleted');renderJournalList();renderTodayJournalPreview();}
+  else if(type==='customGoal'){S.customGoals=S.customGoals.filter(g=>g.id!==id);saveState();syncData('custom_goals',S.customGoals);showToast('Goal deleted');}
   _delCtx=null;closeModal();saveState();updateAll();
 }
 
@@ -1656,7 +1781,7 @@ function initMobileNav(){
 
 // ── INIT ──
 document.getElementById('sbdate').textContent=NOW.toLocaleDateString('en-IN',{weekday:'long',month:'short',day:'numeric'});
-if(S.sbUrl&&S.sbKey){_sbUrl=S.sbUrl;_sbKey=S.sbKey;testConnection();}
+if(S.sbUrl&&S.sbKey){_sbUrl=S.sbUrl;_sbKey=S.sbKey;testConnection().then(()=>pullFromSupabase());}
 
 // Wire sidebar nav
 document.querySelectorAll('.ni[data-page]').forEach(n=>n.addEventListener('click',()=>goTo(n.dataset.page)));
@@ -1686,6 +1811,7 @@ document.getElementById('btn-copy-sql').addEventListener('click',()=>{navigator.
 // Sync
 document.getElementById('btn-connect-sb').addEventListener('click',connectSupabase);
 document.getElementById('btn-test-sb').addEventListener('click',testConnection);
+document.getElementById('btn-sync-now').addEventListener('click',()=>{if(!_sbUrl||!_sbKey){showToast('Connect to Supabase first');return;}pullFromSupabase();});
 // Journal
 document.getElementById('btn-save-journal').addEventListener('click',saveJournalEntry);
 document.getElementById('btn-clear-journal').addEventListener('click',clearJournalForm);
