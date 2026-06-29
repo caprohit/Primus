@@ -295,6 +295,7 @@ input,select,textarea,button{font-family:var(--f)}
   .mobile-nav-item i{font-size:19px;line-height:1}
   .mobile-nav-item.active,.mobile-nav-item.active i{color:#A393F5}
 }
+.mobile-nav{display:none}
 @media(min-width:769px){
   .mobile-nav{display:none!important}
 }
@@ -732,7 +733,7 @@ CREATE POLICY "allow_all_data" ON primus_data FOR ALL USING (true) WITH CHECK (t
 <div class="toast" id="toast"></div>
 
 <!-- MOBILE NAV -->
-<nav class="mobile-nav" id="mobile-nav" style="display:none">
+<nav class="mobile-nav" id="mobile-nav">
   <button class="mobile-nav-item active" data-page="today"><i class="ti ti-checkbox"></i><span>Today</span></button>
   <button class="mobile-nav-item" data-page="journal"><i class="ti ti-notebook"></i><span>Journal</span></button>
   <button class="mobile-nav-item" data-page="diet"><i class="ti ti-salad"></i><span>Diet</span></button>
@@ -855,10 +856,7 @@ function snapshotToday(){
 
 // ── SUPABASE ──
 function sbHeaders(key,extras){
-  const isNew=key.startsWith('sb_');
-  const base=isNew
-    ?{'Authorization':`Bearer ${key}`,'Content-Type':'application/json'}
-    :{'apikey':key,'Authorization':`Bearer ${key}`,'Content-Type':'application/json'};
+  const base={'apikey':key,'Authorization':`Bearer ${key}`,'Content-Type':'application/json'};
   return Object.assign(base,extras||{});
 }
 function normaliseUrl(raw){
