@@ -574,7 +574,8 @@ input,select,textarea,button{font-family:var(--f)}
     <div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-p" id="btn-connect-sb"><i class="ti ti-plug"></i> Connect</button>
       <button class="btn btn-g" id="btn-test-sb"><i class="ti ti-wifi"></i> Test connection</button>
-      <button class="btn btn-g" id="btn-sync-now"><i class="ti ti-refresh"></i> Sync now</button>
+      <button class="btn btn-g" id="btn-sync-now"><i class="ti ti-refresh"></i> Pull from cloud</button>
+      <button class="btn btn-g" id="btn-push-all" style="background:var(--green-l);color:var(--green);border-color:#BBF7D0"><i class="ti ti-cloud-upload"></i> Push all to cloud</button>
     </div>
     <div class="status-row">
       <div class="status-dot" id="conn-dot" style="background:#6B6B8A"></div>
@@ -930,6 +931,50 @@ async function syncJournalToSupabase(entry){
       body:JSON.stringify({entry_date:entry.date,mood:entry.mood,note_text:entry.text,tags:entry.tags})
     });
   }catch(e){}
+}
+
+// Push ALL local data to Supabase in one go
+async function pushAllToSupabase(){
+  if(!_sbUrl||!_sbKey){showToast('Connect to Supabase first');return;}
+  showToast('Pushing all data to cloud…');
+  try{
+    await Promise.all([
+      syncData('meal_plan',S.wp),
+      syncData('workout_splits',S.splits),
+      syncData('custom_goals',S.customGoals),
+      syncData('diet_goals',S.goals),
+    ]);
+    // Push daily logs
+    const logRows=Object.entries(S.dailyLogs).map(([date,d])=>({
+      log_date:date,diet_pct:d.dietPct||0,workout_pct:d.workoutPct||0,
+      water_glasses:d.water||0,calories_eaten:d.calories||0,
+      protein_g:d.protein||0,carbs_g:d.carbs||0,fat_g:d.fat||0,
+      meals_done:d.mealsDone||0,meals_total:d.mealsTotal||0,
+      exercises_done:d.exercisesDone||0,exercises_total:d.exercisesTotal||0,
+      updated_at:d.savedAt||new Date().toISOString()
+    }));
+    if(logRows.length){
+      await fetch(`${_sbUrl}/rest/v1/primus_logs`,{
+        method:'POST',
+        headers:sbHeaders(_sbKey,{'Prefer':'resolution=merge-duplicates'}),
+        body:JSON.stringify(logRows)
+      });
+    }
+    // Push journal
+    const jRows=S.journal.map(e=>({
+      entry_date:e.date,mood:e.mood||'',note_text:e.text||'',
+      tags:e.tags||[],created_at:e.createdAt||new Date().toISOString()
+    }));
+    if(jRows.length){
+      await fetch(`${_sbUrl}/rest/v1/primus_journal`,{
+        method:'POST',
+        headers:sbHeaders(_sbKey,{'Prefer':'resolution=merge-duplicates'}),
+        body:JSON.stringify(jRows)
+      });
+    }
+    showToast('All data pushed to cloud ✓');
+    updateSyncStatus('connected','Pushed ✓');
+  }catch(e){showToast('Push error: '+e.message);}
 }
 
 // Push a key-value blob to primus_data (meal plan, splits, goals)
@@ -1809,6 +1854,7 @@ document.getElementById('btn-copy-sql').addEventListener('click',()=>{navigator.
 document.getElementById('btn-connect-sb').addEventListener('click',connectSupabase);
 document.getElementById('btn-test-sb').addEventListener('click',testConnection);
 document.getElementById('btn-sync-now').addEventListener('click',()=>{if(!_sbUrl||!_sbKey){showToast('Connect to Supabase first');return;}pullFromSupabase();});
+document.getElementById('btn-push-all').addEventListener('click',pushAllToSupabase);
 // Journal
 document.getElementById('btn-save-journal').addEventListener('click',saveJournalEntry);
 document.getElementById('btn-clear-journal').addEventListener('click',clearJournalForm);
