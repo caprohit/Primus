@@ -951,12 +951,16 @@ async function pullFromSupabase(){
   const lbl=document.getElementById('sb-sync-label');
   if(lbl)lbl.textContent='Syncing…';
   try{
-    // 1. Pull daily logs
+    // 1. Pull daily logs — cloud wins (overwrites local)
     const logsRes=await fetch(`${_sbUrl}/rest/v1/primus_logs?select=*&order=log_date.desc&limit=365`,{headers:sbHeaders(_sbKey)});
     if(logsRes.ok){
       const rows=await logsRes.json();
       rows.forEach(row=>{
-        if(!S.dailyLogs[row.log_date]){
+        const local=S.dailyLogs[row.log_date]||{};
+        const cloudSavedAt=new Date(row.updated_at||row.created_at||0).getTime();
+        const localSavedAt=new Date(local.savedAt||0).getTime();
+        // Cloud wins unless local is newer
+        if(cloudSavedAt>=localSavedAt){
           S.dailyLogs[row.log_date]={
             dietPct:row.diet_pct||0,workoutPct:row.workout_pct||0,
             waterPct:row.water_glasses?p100(row.water_glasses,S.goals.water):0,
@@ -970,19 +974,20 @@ async function pullFromSupabase(){
       });
     }
 
-    // 2. Pull journal entries (dedup by date — one entry per day)
+    // 2. Pull journal entries — cloud wins for same date
     const journalRes=await fetch(`${_sbUrl}/rest/v1/primus_journal?select=*&order=entry_date.desc`,{headers:sbHeaders(_sbKey)});
     if(journalRes.ok){
       const rows=await journalRes.json();
       rows.forEach(row=>{
-        if(!S.journal.find(e=>e.date===row.entry_date)){
-          S.journal.push({
-            id:new Date(row.created_at).getTime()||Date.now(),
-            date:row.entry_date,mood:row.mood||'',
-            text:row.note_text||'',tags:row.tags||[],
-            createdAt:row.created_at
-          });
-        }
+        const existing=S.journal.findIndex(e=>e.date===row.entry_date);
+        const entry={
+          id:new Date(row.created_at).getTime()||Date.now(),
+          date:row.entry_date,mood:row.mood||'',
+          text:row.note_text||'',tags:row.tags||[],
+          createdAt:row.created_at
+        };
+        if(existing===-1){S.journal.push(entry);}
+        else{S.journal[existing]=entry;}
       });
     }
 
@@ -1771,12 +1776,6 @@ function updateAll(){
   if(document.getElementById('pg-tracker').classList.contains('active'))renderTracker();
 }
 
-// ── MOBILE NAV ──
-function initMobileNav(){
-  const nav=document.getElementById('mobile-nav');if(!nav)return;
-  nav.style.display=window.innerWidth<=768?'flex':'none';
-}
-
 // ── INIT ──
 document.getElementById('sbdate').textContent=NOW.toLocaleDateString('en-IN',{weekday:'long',month:'short',day:'numeric'});
 if(S.sbUrl&&S.sbKey){_sbUrl=S.sbUrl;_sbKey=S.sbKey;testConnection().then(()=>pullFromSupabase());}
@@ -1843,10 +1842,6 @@ document.getElementById('mc-confirm').addEventListener('click',executeDel);
 document.getElementById('mjv-close').addEventListener('click',closeModal);
 document.getElementById('mg-cancel').addEventListener('click',closeModal);
 document.getElementById('mg-save').addEventListener('click',confirmGoal);
-// Mobile nav resize
-window.addEventListener('resize',initMobileNav);
-window.addEventListener('DOMContentLoaded',initMobileNav);
-setTimeout(initMobileNav,100);
 // Initial render
 renderGoalsForm();
 updateAll();
